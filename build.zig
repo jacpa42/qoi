@@ -4,21 +4,19 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("qoi", .{
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const lib = b.addLibrary(.{
+    const libqoi = b.addLibrary(.{
         .name = "qoi",
         .linkage = .static,
-        .root_module = mod,
+        .root_module = b.addModule("qoi", .{
+            .root_source_file = b.path("qoi.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
-    b.installArtifact(lib);
+    b.installArtifact(libqoi);
 
-    const mod_tests = b.addTest(.{ .root_module = mod });
+    const mod_tests = b.addTest(.{ .root_module = libqoi.root_module });
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const test_step = b.step("test", "Run tests");
 
