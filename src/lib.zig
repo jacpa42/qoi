@@ -49,20 +49,26 @@ const QOI_HEADER_SIZE = 14;
 pub fn decode(
     alloc: Allocator,
     raw_bytes: []const u8,
-) error{ EndOfStream, InvalidFileFormat, OutOfMemory }!QOI {
+) error{
+    EndOfStream,
+    InvalidFileFormat,
+    OutOfMemory,
+    InvalidNumberOfChannels,
+    InvalidColorSpaceDescription,
+}!QOI {
     if (raw_bytes.len <= QOI_HEADER_SIZE) return error.EndOfStream;
     if (!std.mem.eql(u8, raw_bytes[0..4], QOI_MAGIC)) return error.InvalidFileFormat;
 
     const channels: Channels = switch (raw_bytes[12]) {
         0b011 => .RGB,
         0b100 => .RGBA,
-        else => return error.InvalidFileFormat,
+        else => return error.InvalidNumberOfChannels,
     };
 
     const colorspace: ColorSpace = switch (raw_bytes[13]) {
         0b0 => .SRGB,
         0b1 => .LINEAR,
-        else => return error.InvalidFileFormat,
+        else => return error.InvalidColorSpaceDescription,
     };
 
     var image = QOI{
@@ -124,7 +130,7 @@ pub fn decode(
 }
 
 /// Parses bytes from reader into `QOI`.
-pub fn decode_reader(
+pub fn decodeReader(
     alloc: Allocator,
     reader: std.io.Reader,
 ) error{ EndOfStream, InvalidFileFormat, OutOfMemory, ReadFailed }!QOI {
@@ -261,7 +267,7 @@ pub fn encode(
                 if (diff_a != 0) {
                     const pixel = [_]u8{ QOI_OP_RGBA, pix.r, pix.g, pix.b, pix.a };
                     try buf.appendSlice(alloc, &pixel);
-                } else if (in_range(i2, diff_r) and in_range(i2, diff_g) and in_range(i2, diff_b)) {
+                } else if (inRange(i2, diff_r) and inRange(i2, diff_g) and inRange(i2, diff_b)) {
                     try buf.append(
                         alloc,
                         QOI_OP_DIFF |
@@ -269,9 +275,9 @@ pub fn encode(
                             (map2(diff_g) << 2) |
                             (map2(diff_b) << 0),
                     );
-                } else if (in_range(i6, diff_g) and
-                    in_range(i4, diff_rg) and
-                    in_range(i4, diff_rb))
+                } else if (inRange(i6, diff_g) and
+                    inRange(i4, diff_rg) and
+                    inRange(i4, diff_rb))
                 {
                     try buf.appendSlice(alloc, &[_]u8{
                         QOI_OP_LUMA | map6(diff_g),
@@ -291,7 +297,7 @@ pub fn encode(
 }
 
 /// Writes the encoded file to the `std.io.Writer`.
-pub fn encode_writer(
+pub fn encodeWriter(
     self: *const QOI,
     writer: std.io.Writer,
 ) error{WriteFailed}!void {
@@ -339,16 +345,16 @@ pub fn encode_writer(
                 if (diff_a != 0) {
                     const pixel = [_]u8{ QOI_OP_RGBA, pix.r, pix.g, pix.b, pix.a };
                     try writer.writeAll(&pixel);
-                } else if (in_range(i2, diff_r) and in_range(i2, diff_g) and in_range(i2, diff_b)) {
+                } else if (inRange(i2, diff_r) and inRange(i2, diff_g) and inRange(i2, diff_b)) {
                     const byte =
                         QOI_OP_DIFF |
                         (map2(diff_r) << 4) |
                         (map2(diff_g) << 2) |
                         (map2(diff_b) << 0);
                     try writer.writeByte(byte);
-                } else if (in_range(i6, diff_g) and
-                    in_range(i4, diff_rg) and
-                    in_range(i4, diff_rb))
+                } else if (inRange(i6, diff_g) and
+                    inRange(i4, diff_rg) and
+                    inRange(i4, diff_rb))
                 {
                     const buf = [_]u8{
                         QOI_OP_LUMA | map6(diff_g),
@@ -375,7 +381,7 @@ inline fn btn(v: [4]u8) u32 {
     return @bitCast(std.mem.bigToNative(u32, @bitCast(v)));
 }
 
-inline fn in_range(comptime T: type, val: i16) bool {
+inline fn inRange(comptime T: type, val: i16) bool {
     if (@typeInfo(T).int.signedness != .signed) @compileError("");
     return std.math.minInt(T) <= val and val <= std.math.maxInt(T);
 }
