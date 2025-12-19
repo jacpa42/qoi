@@ -1,10 +1,16 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+pub const DecodeError = error{
+    InvalidFileFormat,
+    OutOfMemory,
+    InvalidNumberOfChannels,
+    InvalidColorSpaceDescription,
+};
 pub const rgba = @Vector(4, u8);
 pub const Channels = enum(u8) { RGB = 3, RGBA = 4 };
 pub const ColorSpace = enum(u8) { SRGB = 0, LINEAR = 1 };
-pub const Op = struct {
+pub const OP = struct {
     const RGB = 0xfe;
     const RGBA = 0xff;
     const INDEX = 0x00;
@@ -38,37 +44,23 @@ pub fn deinit(self: QOI, alloc: Allocator) void {
 pub fn decode(
     alloc: Allocator,
     raw_bytes: []const u8,
-) error{
-    InvalidFileFormat,
-    OutOfMemory,
-    InvalidNumberOfChannels,
-    InvalidColorSpaceDescription,
-}!QOI {
-    if (raw_bytes.len <= HEADER_SIZE or !std.mem.eql(u8, raw_bytes[0..4], MAGIC)) return error.InvalidFileFormat;
-
-    const channels: Channels = switch (raw_bytes[12]) {
-        0b011 => .RGB,
-        0b100 => .RGBA,
-        else => return error.InvalidNumberOfChannels,
-    };
-
-    const colorspace: ColorSpace = switch (raw_bytes[13]) {
-        0b0 => .SRGB,
-        0b1 => .LINEAR,
-        else => return error.InvalidColorSpaceDescription,
-    };
+) DecodeError!QOI {
+    if (raw_bytes.len <= HEADER_SIZE or
+        !std.mem.eql(u8, raw_bytes[0..4], MAGIC))
+    {
+        return error.InvalidFileFormat;
+    }
 
     var image: QOI = undefined;
     image.width = btn(raw_bytes[4..8].*);
     image.height = btn(raw_bytes[8..12].*);
-    image.channels = channels;
-    image.colorspace = colorspace;
-
+    image.channels = ite(Channels, raw_bytes[12]) catch return error.InvalidNumberOfChannels;
+    image.colorspace = ite(ColorSpace, raw_bytes[13]) catch return error.InvalidNumberOfChannels;
     image.pixels = try alloc.alloc(rgba, @as(usize, image.width) * @as(usize, image.height));
     errdefer alloc.free(image.pixels);
 
     var color_lut: [64]rgba = @splat(@splat(0));
-    var pix = rgba{ 0xff, 0x00, 0x00, 0x00 };
+    var pix = rgba{ 0x00, 0x00, 0x00, 0xff };
     var data = raw_bytes[HEADER_SIZE..];
     var run: usize = 0;
 
@@ -79,24 +71,24 @@ pub fn decode(
             const byte = data[0];
             data = data[1..];
 
-            if (byte == Op.RGB) {
+            if (byte == OP.RGB) {
                 pix[0] = data[0];
                 pix[1] = data[1];
                 pix[2] = data[2];
                 data = data[3..];
-            } else if (byte == Op.RGBA) {
+            } else if (byte == OP.RGBA) {
                 pix = data[0..4].*;
                 data = data[4..];
-            } else if (byte & 0xc0 == Op.INDEX) {
+            } else if (byte & 0xc0 == OP.INDEX) {
                 pix = color_lut[byte];
-            } else if (byte & 0xc0 == Op.DIFF) {
+            } else if (byte & 0xc0 == OP.DIFF) {
                 var diff: rgba = @splat(byte);
                 diff >>= rgba{ 4, 2, 0, 0 };
                 diff &= @splat(3);
                 diff -%= @splat(2);
                 diff[3] = 0;
                 pix +%= diff;
-            } else if (byte & 0xc0 == Op.LUMA) {
+            } else if (byte & 0xc0 == OP.LUMA) {
                 const dg = (byte & 63) -% 32;
                 pix +%= rgba{
                     (data[0] >> 4) -% 8 +% dg,
@@ -105,7 +97,7 @@ pub fn decode(
                     0,
                 };
                 data = data[1..];
-            } else if (byte & 0xc0 == Op.RUN) {
+            } else if (byte & 0xc0 == OP.RUN) {
                 run = byte & 0x3f;
             }
 
@@ -122,69 +114,60 @@ pub fn decode(
 pub fn decodeReader(
     alloc: Allocator,
     reader: *std.Io.Reader,
-) error{ EndOfStream, InvalidFileFormat, OutOfMemory, ReadFailed }!QOI {
-    const header = try reader.takeArray(HEADER_SIZE);
+) (DecodeError || error{ReadFailed})!QOI {
+    const header = reader.takeArray(HEADER_SIZE) catch {
+        return error.InvalidFileFormat;
+    };
 
     if (!std.mem.eql(u8, header[0..4], MAGIC)) return error.InvalidFileFormat;
-
-    const channels: Channels = switch (header[12]) {
-        0b011 => .RGB,
-        0b100 => .RGBA,
-        else => return error.InvalidFileFormat,
-    };
-
-    const colorspace: ColorSpace = switch (header[13]) {
-        0b0 => .SRGB,
-        0b1 => .LINEAR,
-        else => return error.InvalidFileFormat,
-    };
 
     var image: QOI = undefined;
     image.width = btn(header[4..8].*);
     image.height = btn(header[8..12].*);
-    image.channels = channels;
-    image.colorspace = colorspace;
+    image.channels = ite(Channels, header[12]) catch return error.InvalidNumberOfChannels;
+    image.colorspace = ite(ColorSpace, header[13]) catch return error.InvalidColorSpaceDescription;
     image.pixels = try alloc.alloc(rgba, @as(usize, image.width) * @as(usize, image.height));
     errdefer alloc.free(image.pixels);
 
     var color_lut: [64]rgba = @splat(@splat(0));
-    var pix = rgba{ 0xff, 0x00, 0x00, 0x00 };
+    var pix = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: usize = 0;
 
     for (image.pixels) |*pixel| {
         if (run > 0) {
             run -= 1;
         } else {
-            const byte = reader.takeByte() catch |err| {
-                if (err == error.EndOfStream) break else return err;
+            _ = reader.peek(EOF.len + 1) catch |e| {
+                if (e == error.EndOfStream) break else return error.InvalidFileFormat;
             };
-            if (byte == Op.RGB) {
-                const data = try reader.takeArray(3);
+            const byte = reader.takeByte() catch unreachable;
+            if (byte == OP.RGB) {
+                const data = reader.takeArray(3) catch unreachable;
                 pix[0] = data[0];
                 pix[1] = data[1];
                 pix[2] = data[2];
-            } else if (byte == Op.RGBA) {
-                const data = try reader.takeArray(4);
+            } else if (byte == OP.RGBA) {
+                const data = reader.takeArray(4) catch unreachable;
                 pix = @as(rgba, @bitCast(data.*));
-            } else if (byte & 0xc0 == Op.INDEX) {
+            } else if (byte & 0xc0 == OP.INDEX) {
                 pix = color_lut[byte];
-            } else if (byte & 0xc0 == Op.DIFF) {
+            } else if (byte & 0xc0 == OP.DIFF) {
                 var diff: rgba = @splat(byte);
                 diff >>= rgba{ 4, 2, 0, 0 };
                 diff &= @splat(3);
                 diff -%= @splat(2);
                 diff[3] = 0;
                 pix +%= diff;
-            } else if (byte & 0xc0 == Op.LUMA) {
-                const data = try reader.takeByte();
-                const dg = (byte & 63) -% 32;
+            } else if (byte & 0xc0 == OP.LUMA) {
+                const data = reader.takeByte() catch unreachable;
+                const dg = (byte & 0x3f) -% 32;
                 pix +%= rgba{
                     (data >> 4) -% 8 +% dg,
                     dg,
                     (data & 15) -% 8 +% dg,
                     0,
                 };
-            } else if (byte & 0xc0 == Op.RUN) {
+            } else if (byte & 0xc0 == OP.RUN) {
                 run = byte & 0x3f;
             }
 
@@ -208,8 +191,7 @@ pub fn encode(
 ) error{ EndOfStream, InvalidFileFormat, OutOfMemory }!std.ArrayList(u8) {
     // Allocates a big ol slice to decode the buffer
     // I just use this ratio: https://qoiformat.org/benchmark/ ~ 33%
-    const capacity = @divFloor(self.pixels.len, 3);
-    var buf = try std.ArrayList(u8).initCapacity(alloc, capacity);
+    var buf = try std.ArrayList(u8).initCapacity(alloc, @divFloor(self.pixels.len, 3));
     errdefer buf.deinit(alloc);
 
     try buf.appendSlice(alloc, MAGIC ++
@@ -221,7 +203,7 @@ pub fn encode(
         });
 
     var color_lut: [64]rgba = @splat(@splat(0));
-    var prev = rgba{ 0xff, 0x00, 0x00, 0x00 };
+    var prev = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: u8 = 0;
 
     for (self.pixels, 0..) |pix, i| {
@@ -234,14 +216,14 @@ pub fn encode(
         if (run > 0 and (run == 62 or !same_pixel or (i == (self.pixels.len - 1)))) {
             // Op.RUN
             std.debug.assert(run >= 1 and run <= 62);
-            try buf.append(alloc, Op.RUN | (run - 1));
+            try buf.append(alloc, OP.RUN | (run - 1));
             run = 0;
         }
 
         if (!same_pixel) {
             const pix_hash = hash(pix);
             if (std.meta.eql(color_lut[pix_hash], pix)) {
-                try buf.append(alloc, Op.INDEX | pix_hash);
+                try buf.append(alloc, OP.INDEX | pix_hash);
             } else {
                 color_lut[pix_hash] = pix;
 
@@ -252,12 +234,12 @@ pub fn encode(
                 const diff_bg = diff_b - diff_g;
 
                 if (diff_a != 0) {
-                    const pixel = [_]u8{ Op.RGBA, pix[0], pix[1], pix[2], pix[3] };
+                    const pixel = [_]u8{ OP.RGBA, pix[0], pix[1], pix[2], pix[3] };
                     try buf.appendSlice(alloc, &pixel);
                 } else if (inRange(i2, diff_r) and inRange(i2, diff_g) and inRange(i2, diff_b)) {
                     try buf.append(
                         alloc,
-                        Op.DIFF |
+                        OP.DIFF |
                             (map2(diff_r) << 4) |
                             (map2(diff_g) << 2) |
                             (map2(diff_b) << 0),
@@ -267,11 +249,11 @@ pub fn encode(
                     inRange(i4, diff_bg))
                 {
                     try buf.appendSlice(alloc, &[_]u8{
-                        Op.LUMA | map6(diff_g),
+                        OP.LUMA | map6(diff_g),
                         (map4(diff_rg) << 4) | (map4(diff_bg) << 0),
                     });
                 } else {
-                    const pixel = [_]u8{ Op.RGB, pix[0], pix[1], pix[2] };
+                    const pixel = [_]u8{ OP.RGB, pix[0], pix[1], pix[2] };
                     try buf.appendSlice(alloc, &pixel);
                 }
             }
@@ -294,7 +276,7 @@ pub fn encodeWriter(
         [_]u8{ @intFromEnum(self.channels), @intFromEnum(self.colorspace) });
 
     var color_lut: [64]rgba = @splat(@splat(0));
-    var prev = rgba{ 0xff, 0x00, 0x00, 0x00 };
+    var prev = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: u8 = 0;
 
     for (self.pixels, 0..) |pix, i| {
@@ -307,14 +289,14 @@ pub fn encodeWriter(
         if (run > 0 and (run == 62 or !same_pixel or (i == (self.pixels.len - 1)))) {
             // Op.RUN
             std.debug.assert(run >= 1 and run <= 62);
-            try writer.writeByte(Op.RUN | (run - 1));
+            try writer.writeByte(OP.RUN | (run - 1));
             run = 0;
         }
 
         if (!same_pixel) {
             const pix_hash = hash(pix);
             if (std.meta.eql(color_lut[pix_hash], pix)) {
-                try writer.writeByte(Op.INDEX | pix_hash);
+                try writer.writeByte(OP.INDEX | pix_hash);
             } else {
                 color_lut[pix_hash] = pix;
 
@@ -325,11 +307,11 @@ pub fn encodeWriter(
                 const diff_rb = diff_b - diff_g;
 
                 if (diff_a != 0) {
-                    const pixel = [_]u8{ Op.RGBA, pix[0], pix[1], pix[2], pix[3] };
+                    const pixel = [_]u8{ OP.RGBA, pix[0], pix[1], pix[2], pix[3] };
                     try writer.writeAll(&pixel);
                 } else if (inRange(i2, diff_r) and inRange(i2, diff_g) and inRange(i2, diff_b)) {
                     const byte =
-                        Op.DIFF |
+                        OP.DIFF |
                         (map2(diff_r) << 4) |
                         (map2(diff_g) << 2) |
                         (map2(diff_b) << 0);
@@ -338,10 +320,10 @@ pub fn encodeWriter(
                     inRange(i4, diff_rg) and
                     inRange(i4, diff_rb))
                 {
-                    try writer.writeByte(Op.LUMA | map6(diff_g));
+                    try writer.writeByte(OP.LUMA | map6(diff_g));
                     try writer.writeByte((map4(diff_rg) << 4) | (map4(diff_rb) << 0));
                 } else {
-                    const pixel = [_]u8{ Op.RGB, pix[0], pix[1], pix[2] };
+                    const pixel = [_]u8{ OP.RGB, pix[0], pix[1], pix[2] };
                     try writer.writeAll(&pixel);
                 }
             }
@@ -351,6 +333,8 @@ pub fn encodeWriter(
     try writer.writeAll(EOF);
     try writer.flush();
 }
+
+const ite = std.meta.intToEnum;
 
 inline fn hash(color: rgba) u8 {
     return 0x3f & @reduce(.Add, color *% rgba{ 3, 5, 7, 11 });
