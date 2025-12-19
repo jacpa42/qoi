@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
         .name = "qoi",
         .linkage = .static,
         .root_module = b.addModule("qoi", .{
-            .root_source_file = b.path("qoi.zig"),
+            .root_source_file = b.path("QOI.zig"),
             .target = target,
             .optimize = optimize,
         }),
