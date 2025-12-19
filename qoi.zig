@@ -93,7 +93,7 @@ pub fn decode(
                 var diff: rgba = @splat(byte);
                 diff >>= rgba{ 4, 2, 0, 0 };
                 diff &= @splat(3);
-                diff -= @splat(2);
+                diff -%= @splat(2);
                 diff[3] = 0;
                 pix +%= diff;
             } else if (byte & 0xc0 == Op.LUMA) {
