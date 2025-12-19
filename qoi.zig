@@ -1,41 +1,36 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// A parsed QOI image. Does not hold onto an allocator. Use `image.deinit(alloc)` to free memory.
-pub const Qoi = struct {
-    width: u32,
-    height: u32,
-    channels: Channels,
-    colorspace: ColorSpace,
-
-    /// Pixel array list. Memory is externally managed.
-    pixels: []rgba,
-
-    pub fn deinit(self: *@This(), alloc: Allocator) void {
-        alloc.free(self.pixels);
-        self.* = undefined;
-    }
-};
-
+pub const rgba = @Vector(4, u8);
 pub const Channels = enum(u8) { RGB = 3, RGBA = 4 };
 pub const ColorSpace = enum(u8) { SRGB = 0, LINEAR = 1 };
+pub const Op = struct {
+    const RGB = 0xfe;
+    const RGBA = 0xff;
+    const INDEX = 0x00;
+    const DIFF = 0x40;
+    const LUMA = 0x80;
+    const RUN = 0xc0;
+};
 
-/// Simple rgba color.
-pub const rgba = @Vector(4, u8);
-inline fn hash(color: rgba) u8 {
-    return 0x3f & @reduce(.Add, color *% rgba{ 3, 5, 7, 11 });
+const MAGIC = "qoif";
+const EOF = "\x00" ** 7 ++ "\x01";
+const HEADER_SIZE = 14;
+
+/// A parsed QOI image. Does not hold onto an allocator. Use `image.deinit(alloc)` to free memory.
+const QOI = @This();
+
+width: u32,
+height: u32,
+channels: Channels,
+colorspace: ColorSpace,
+
+/// Pixel array list. Memory is externally managed.
+pixels: []rgba,
+
+pub fn deinit(self: QOI, alloc: Allocator) void {
+    alloc.free(self.pixels);
 }
-
-const QOI_OP_RGB = 0xfe;
-const QOI_OP_RGBA = 0xff;
-const QOI_OP_INDEX = 0x00;
-const QOI_OP_DIFF = 0x40;
-const QOI_OP_LUMA = 0x80;
-const QOI_OP_RUN = 0xc0;
-
-const QOI_MAGIC = "qoif";
-const QOI_EOF = "\x00" ** 7 ++ "\x01";
-const QOI_HEADER_SIZE = 14;
 
 /// Parses bytes from the buffer into `QOI`.
 ///
@@ -44,14 +39,12 @@ pub fn decode(
     alloc: Allocator,
     raw_bytes: []const u8,
 ) error{
-    EndOfStream,
     InvalidFileFormat,
     OutOfMemory,
     InvalidNumberOfChannels,
     InvalidColorSpaceDescription,
-}!Qoi {
-    if (raw_bytes.len <= QOI_HEADER_SIZE) return error.EndOfStream;
-    if (!std.mem.eql(u8, raw_bytes[0..4], QOI_MAGIC)) return error.InvalidFileFormat;
+}!QOI {
+    if (raw_bytes.len <= HEADER_SIZE or !std.mem.eql(u8, raw_bytes[0..4], MAGIC)) return error.InvalidFileFormat;
 
     const channels: Channels = switch (raw_bytes[12]) {
         0b011 => .RGB,
@@ -65,7 +58,7 @@ pub fn decode(
         else => return error.InvalidColorSpaceDescription,
     };
 
-    var image: Qoi = undefined;
+    var image: QOI = undefined;
     image.width = btn(raw_bytes[4..8].*);
     image.height = btn(raw_bytes[8..12].*);
     image.channels = channels;
@@ -76,34 +69,34 @@ pub fn decode(
 
     var color_lut: [64]rgba = @splat(@splat(0));
     var pix = rgba{ 0xff, 0x00, 0x00, 0x00 };
-    var data = raw_bytes[QOI_HEADER_SIZE..];
+    var data = raw_bytes[HEADER_SIZE..];
     var run: usize = 0;
 
     for (image.pixels) |*pixel| {
         if (run > 0) {
             run -= 1;
-        } else if (data.len > QOI_EOF.len) {
+        } else if (data.len > EOF.len) {
             const byte = data[0];
             data = data[1..];
 
-            if (byte == QOI_OP_RGB) {
+            if (byte == Op.RGB) {
                 pix[0] = data[0];
                 pix[1] = data[1];
                 pix[2] = data[2];
                 data = data[3..];
-            } else if (byte == QOI_OP_RGBA) {
+            } else if (byte == Op.RGBA) {
                 pix = data[0..4].*;
                 data = data[4..];
-            } else if (byte & 0xc0 == QOI_OP_INDEX) {
+            } else if (byte & 0xc0 == Op.INDEX) {
                 pix = color_lut[byte];
-            } else if (byte & 0xc0 == QOI_OP_DIFF) {
+            } else if (byte & 0xc0 == Op.DIFF) {
                 var diff: rgba = @splat(byte);
                 diff >>= rgba{ 4, 2, 0, 0 };
                 diff &= @splat(3);
                 diff -= @splat(2);
                 diff[3] = 0;
                 pix +%= diff;
-            } else if (byte & 0xc0 == QOI_OP_LUMA) {
+            } else if (byte & 0xc0 == Op.LUMA) {
                 const dg = (byte & 63) -% 32;
                 pix +%= rgba{
                     (data[0] >> 4) -% 8 +% dg,
@@ -112,7 +105,7 @@ pub fn decode(
                     0,
                 };
                 data = data[1..];
-            } else if (byte & 0xc0 == QOI_OP_RUN) {
+            } else if (byte & 0xc0 == Op.RUN) {
                 run = byte & 0x3f;
             }
 
@@ -129,10 +122,10 @@ pub fn decode(
 pub fn decodeReader(
     alloc: Allocator,
     reader: *std.Io.Reader,
-) error{ EndOfStream, InvalidFileFormat, OutOfMemory, ReadFailed }!Qoi {
-    const header = try reader.takeArray(QOI_HEADER_SIZE);
+) error{ EndOfStream, InvalidFileFormat, OutOfMemory, ReadFailed }!QOI {
+    const header = try reader.takeArray(HEADER_SIZE);
 
-    if (!std.mem.eql(u8, header[0..4], QOI_MAGIC)) return error.InvalidFileFormat;
+    if (!std.mem.eql(u8, header[0..4], MAGIC)) return error.InvalidFileFormat;
 
     const channels: Channels = switch (header[12]) {
         0b011 => .RGB,
@@ -146,7 +139,7 @@ pub fn decodeReader(
         else => return error.InvalidFileFormat,
     };
 
-    var image: Qoi = undefined;
+    var image: QOI = undefined;
     image.width = btn(header[4..8].*);
     image.height = btn(header[8..12].*);
     image.channels = channels;
@@ -165,24 +158,24 @@ pub fn decodeReader(
             const byte = reader.takeByte() catch |err| {
                 if (err == error.EndOfStream) break else return err;
             };
-            if (byte == QOI_OP_RGB) {
+            if (byte == Op.RGB) {
                 const data = try reader.takeArray(3);
                 pix[0] = data[0];
                 pix[1] = data[1];
                 pix[2] = data[2];
-            } else if (byte == QOI_OP_RGBA) {
+            } else if (byte == Op.RGBA) {
                 const data = try reader.takeArray(4);
                 pix = @as(rgba, @bitCast(data.*));
-            } else if (byte & 0xc0 == QOI_OP_INDEX) {
+            } else if (byte & 0xc0 == Op.INDEX) {
                 pix = color_lut[byte];
-            } else if (byte & 0xc0 == QOI_OP_DIFF) {
+            } else if (byte & 0xc0 == Op.DIFF) {
                 var diff: rgba = @splat(byte);
                 diff >>= rgba{ 4, 2, 0, 0 };
                 diff &= @splat(3);
                 diff -%= @splat(2);
                 diff[3] = 0;
                 pix +%= diff;
-            } else if (byte & 0xc0 == QOI_OP_LUMA) {
+            } else if (byte & 0xc0 == Op.LUMA) {
                 const data = try reader.takeByte();
                 const dg = (byte & 63) -% 32;
                 pix +%= rgba{
@@ -191,7 +184,7 @@ pub fn decodeReader(
                     (data & 15) -% 8 +% dg,
                     0,
                 };
-            } else if (byte & 0xc0 == QOI_OP_RUN) {
+            } else if (byte & 0xc0 == Op.RUN) {
                 run = byte & 0x3f;
             }
 
@@ -210,18 +203,16 @@ pub fn decodeReader(
 ///
 /// `inital_capacity`: Optionally pass a size to preallocate for the data arraylist.
 pub fn encode(
-    self: Qoi,
+    self: QOI,
     alloc: Allocator,
-    inital_capacity: ?usize,
 ) error{ EndOfStream, InvalidFileFormat, OutOfMemory }!std.ArrayList(u8) {
     // Allocates a big ol slice to decode the buffer
-
-    // If they don't pass in the capacity I just use this ratio: https://qoiformat.org/benchmark/ ~ 33%
-    const capacity = inital_capacity orelse @divFloor(self.pixels.len, 3);
+    // I just use this ratio: https://qoiformat.org/benchmark/ ~ 33%
+    const capacity = @divFloor(self.pixels.len, 3);
     var buf = try std.ArrayList(u8).initCapacity(alloc, capacity);
     errdefer buf.deinit(alloc);
 
-    try buf.appendSlice(alloc, QOI_MAGIC ++
+    try buf.appendSlice(alloc, MAGIC ++
         ntb(self.width) ++
         ntb(self.height) ++
         [_]u8{
@@ -241,16 +232,16 @@ pub fn encode(
         if (same_pixel) run += 1;
 
         if (run > 0 and (run == 62 or !same_pixel or (i == (self.pixels.len - 1)))) {
-            // QOI_OP_RUN
+            // Op.RUN
             std.debug.assert(run >= 1 and run <= 62);
-            try buf.append(alloc, QOI_OP_RUN | (run - 1));
+            try buf.append(alloc, Op.RUN | (run - 1));
             run = 0;
         }
 
         if (!same_pixel) {
             const pix_hash = hash(pix);
             if (std.meta.eql(color_lut[pix_hash], pix)) {
-                try buf.append(alloc, QOI_OP_INDEX | pix_hash);
+                try buf.append(alloc, Op.INDEX | pix_hash);
             } else {
                 color_lut[pix_hash] = pix;
 
@@ -261,12 +252,12 @@ pub fn encode(
                 const diff_bg = diff_b - diff_g;
 
                 if (diff_a != 0) {
-                    const pixel = [_]u8{ QOI_OP_RGBA, pix[0], pix[1], pix[2], pix[3] };
+                    const pixel = [_]u8{ Op.RGBA, pix[0], pix[1], pix[2], pix[3] };
                     try buf.appendSlice(alloc, &pixel);
                 } else if (inRange(i2, diff_r) and inRange(i2, diff_g) and inRange(i2, diff_b)) {
                     try buf.append(
                         alloc,
-                        QOI_OP_DIFF |
+                        Op.DIFF |
                             (map2(diff_r) << 4) |
                             (map2(diff_g) << 2) |
                             (map2(diff_b) << 0),
@@ -276,34 +267,31 @@ pub fn encode(
                     inRange(i4, diff_bg))
                 {
                     try buf.appendSlice(alloc, &[_]u8{
-                        QOI_OP_LUMA | map6(diff_g),
+                        Op.LUMA | map6(diff_g),
                         (map4(diff_rg) << 4) | (map4(diff_bg) << 0),
                     });
                 } else {
-                    const pixel = [_]u8{ QOI_OP_RGB, pix[0], pix[1], pix[2] };
+                    const pixel = [_]u8{ Op.RGB, pix[0], pix[1], pix[2] };
                     try buf.appendSlice(alloc, &pixel);
                 }
             }
         }
     }
 
-    try buf.appendSlice(alloc, QOI_EOF);
+    try buf.appendSlice(alloc, EOF);
 
     return buf;
 }
 
 /// Writes the encoded file to the `std.io.Writer`.
 pub fn encodeWriter(
-    self: Qoi,
+    self: QOI,
     writer: *std.Io.Writer,
 ) error{WriteFailed}!void {
-    try writer.writeAll(QOI_MAGIC ++
+    try writer.writeAll(MAGIC ++
         ntb(self.width) ++
         ntb(self.height) ++
-        [_]u8{
-            @intFromEnum(self.channels),
-            @intFromEnum(self.colorspace),
-        });
+        [_]u8{ @intFromEnum(self.channels), @intFromEnum(self.colorspace) });
 
     var color_lut: [64]rgba = @splat(@splat(0));
     var prev = rgba{ 0xff, 0x00, 0x00, 0x00 };
@@ -317,16 +305,16 @@ pub fn encodeWriter(
         if (same_pixel) run += 1;
 
         if (run > 0 and (run == 62 or !same_pixel or (i == (self.pixels.len - 1)))) {
-            // QOI_OP_RUN
+            // Op.RUN
             std.debug.assert(run >= 1 and run <= 62);
-            try writer.writeByte(QOI_OP_RUN | (run - 1));
+            try writer.writeByte(Op.RUN | (run - 1));
             run = 0;
         }
 
         if (!same_pixel) {
             const pix_hash = hash(pix);
             if (std.meta.eql(color_lut[pix_hash], pix)) {
-                try writer.writeByte(QOI_OP_INDEX | pix_hash);
+                try writer.writeByte(Op.INDEX | pix_hash);
             } else {
                 color_lut[pix_hash] = pix;
 
@@ -337,11 +325,11 @@ pub fn encodeWriter(
                 const diff_rb = diff_b - diff_g;
 
                 if (diff_a != 0) {
-                    const pixel = [_]u8{ QOI_OP_RGBA, pix[0], pix[1], pix[2], pix[3] };
+                    const pixel = [_]u8{ Op.RGBA, pix[0], pix[1], pix[2], pix[3] };
                     try writer.writeAll(&pixel);
                 } else if (inRange(i2, diff_r) and inRange(i2, diff_g) and inRange(i2, diff_b)) {
                     const byte =
-                        QOI_OP_DIFF |
+                        Op.DIFF |
                         (map2(diff_r) << 4) |
                         (map2(diff_g) << 2) |
                         (map2(diff_b) << 0);
@@ -350,18 +338,22 @@ pub fn encodeWriter(
                     inRange(i4, diff_rg) and
                     inRange(i4, diff_rb))
                 {
-                    try writer.writeByte(QOI_OP_LUMA | map6(diff_g));
+                    try writer.writeByte(Op.LUMA | map6(diff_g));
                     try writer.writeByte((map4(diff_rg) << 4) | (map4(diff_rb) << 0));
                 } else {
-                    const pixel = [_]u8{ QOI_OP_RGB, pix[0], pix[1], pix[2] };
+                    const pixel = [_]u8{ Op.RGB, pix[0], pix[1], pix[2] };
                     try writer.writeAll(&pixel);
                 }
             }
         }
     }
 
-    try writer.writeAll(QOI_EOF);
+    try writer.writeAll(EOF);
     try writer.flush();
+}
+
+inline fn hash(color: rgba) u8 {
+    return 0x3f & @reduce(.Add, color *% rgba{ 3, 5, 7, 11 });
 }
 
 inline fn ntb(v: u32) [4]u8 {
@@ -400,7 +392,7 @@ test "encode decode encode" {
 
             const width = rng.intRangeAtMost(u32, 100, 1000);
             const height = rng.intRangeAtMost(u32, 100, 1000);
-            var image = Qoi{
+            var image = QOI{
                 .width = width,
                 .height = height,
                 .channels = rng.enumValue(Channels),
@@ -409,16 +401,12 @@ test "encode decode encode" {
             };
             defer image.deinit(alloc);
 
-            var encoded = try encode(image, alloc, null);
+            var encoded = try encode(image, alloc);
             defer encoded.deinit(alloc);
             var decoded_image = try decode(alloc, encoded.items);
             defer decoded_image.deinit(alloc);
 
-            for (0.., decoded_image.pixels, image.pixels) |idx, l, r| {
-                if (@reduce(.And, l != r)) {
-                    std.debug.panic("{} l==r failed {any} {any}", .{ idx, l, r });
-                }
-            }
+            try std.testing.expectEqualDeep(image, decoded_image);
         }
 
         {
@@ -427,7 +415,7 @@ test "encode decode encode" {
 
             const width = rng.intRangeAtMost(u32, 100, 1000);
             const height = rng.intRangeAtMost(u32, 100, 1000);
-            var image = Qoi{
+            var image = QOI{
                 .width = width,
                 .height = height,
                 .channels = rng.enumValue(Channels),
@@ -445,11 +433,7 @@ test "encode decode encode" {
             var decoded_image = try decodeReader(alloc, &reader);
             defer decoded_image.deinit(alloc);
 
-            for (0.., decoded_image.pixels, image.pixels) |idx, l, r| {
-                if (@reduce(.And, l != r)) {
-                    std.debug.panic("{} l==r failed {any} {any}", .{ idx, l, r });
-                }
-            }
+            try std.testing.expectEqualDeep(image, decoded_image);
         }
     }
 }
@@ -480,7 +464,7 @@ test "fuzz test success" {
             rand.seed(seed);
             const rng = rand.random();
 
-            const len = rng.intRangeAtMost(usize, QOI_HEADER_SIZE + QOI_EOF.len, 10_000);
+            const len = rng.intRangeAtMost(usize, HEADER_SIZE + EOF.len, 10_000);
             const bytes = try alloc.alloc(u8, len);
             defer alloc.free(bytes);
 
@@ -489,7 +473,7 @@ test "fuzz test success" {
             const channels = rng.enumValue(Channels);
             const colorspace = rng.enumValue(ColorSpace);
 
-            @memcpy(bytes[0..QOI_HEADER_SIZE], QOI_MAGIC ++
+            @memcpy(bytes[0..HEADER_SIZE], MAGIC ++
                 ntb(width) ++
                 ntb(height) ++
                 [_]u8{
@@ -497,12 +481,9 @@ test "fuzz test success" {
                     @intFromEnum(colorspace),
                 });
 
-            @memcpy(bytes[bytes.len - QOI_EOF.len ..], QOI_EOF);
+            @memcpy(bytes[bytes.len - EOF.len ..], EOF);
 
-            var image = decode(alloc, bytes) catch {
-                std.debug.print("seed failed: {}\n", .{seed});
-                unreachable;
-            };
+            var image = try decode(alloc, bytes);
             defer image.deinit(alloc);
         }
 
@@ -511,7 +492,7 @@ test "fuzz test success" {
             rand.seed(seed);
             const rng = rand.random();
 
-            const len = rng.intRangeAtMost(usize, QOI_HEADER_SIZE + QOI_EOF.len, 10_000);
+            const len = rng.intRangeAtMost(usize, HEADER_SIZE + EOF.len, 10_000);
             const bytes = try alloc.alloc(u8, len);
             defer alloc.free(bytes);
 
@@ -520,7 +501,7 @@ test "fuzz test success" {
             const channels = rng.enumValue(Channels);
             const colorspace = rng.enumValue(ColorSpace);
 
-            @memcpy(bytes[0..QOI_HEADER_SIZE], QOI_MAGIC ++
+            @memcpy(bytes[0..HEADER_SIZE], MAGIC ++
                 ntb(width) ++
                 ntb(height) ++
                 [_]u8{
@@ -528,13 +509,10 @@ test "fuzz test success" {
                     @intFromEnum(colorspace),
                 });
 
-            @memcpy(bytes[bytes.len - QOI_EOF.len ..], QOI_EOF);
+            @memcpy(bytes[bytes.len - EOF.len ..], EOF);
 
             var reader = std.io.Reader.fixed(bytes);
-            var image = decodeReader(alloc, &reader) catch {
-                std.debug.print("seed failed: {}\n", .{seed});
-                unreachable;
-            };
+            var image = try decodeReader(alloc, &reader);
             defer image.deinit(alloc);
         }
     }
