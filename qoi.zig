@@ -34,6 +34,7 @@ pub const OP = struct {
     const RUN = 0xc0;
 };
 
+const max_pixels = 400_000_000;
 const MAGIC = "qoif";
 const EOF = "\x00" ** 7 ++ "\x01";
 const HEADER_SIZE = 14;
@@ -82,6 +83,9 @@ pub fn decodeReader(
 
     const cnum: usize = @intFromEnum(image.channels);
     const num_pixels = @as(usize, image.width) * @as(usize, image.height);
+
+    if (num_pixels > max_pixels) return error.OutOfMemory;
+
     image.pixels = try alloc.alloc(u8, cnum * num_pixels);
     errdefer alloc.free(image.pixels);
 
@@ -167,9 +171,7 @@ pub fn encode(
 ) error{WriteFailed}!std.ArrayList(u8) {
     var out = std.io.Writer.Allocating.init(alloc);
     errdefer out.deinit();
-
     try encodeWriter(self, &out.writer, options);
-
     return out.toArrayList();
 }
 
@@ -179,13 +181,15 @@ pub fn encodeWriter(
     writer: *std.Io.Writer,
     options: Options,
 ) error{WriteFailed}!void {
-    try writer.writeAll(MAGIC ++
-        ntb(self.width) ++
-        ntb(self.height) ++
-        [_]u8{ @intFromEnum(self.channels), @intFromEnum(self.colorspace) });
+    const pixel_info = [2]u8{ @intFromEnum(self.channels), @intFromEnum(self.colorspace) };
+    const header = MAGIC ++ ntb(self.width) ++ ntb(self.height) ++ pixel_info;
+    try writer.writeAll(header);
 
     const cnum: usize = @intFromEnum(self.channels);
     const num_pixels = @as(usize, self.width) * @as(usize, self.height);
+
+    if (num_pixels > max_pixels) return error.WriteFailed;
+
     var color_lut: [64]rgba = @splat(@splat(0));
     var prev = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: u8 = 0;
