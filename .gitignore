@@ -3,3 +3,4 @@ zig-out/
 images/
 qoi-specification.pdf
 **/.DS_Store
+**.qoi
