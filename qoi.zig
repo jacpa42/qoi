@@ -143,39 +143,19 @@ pub fn decodeReader(
     var pix = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: usize = 0;
 
-    switch (options.flip) {
-        .none => {
-            for (image.pixels) |*pixel| {
-                pixel.* = try decodePixelReader(&pix, &run, &color_lut, reader);
-            }
-        },
-        .x => {
-            var y: usize = 0;
-            while (y < image.pixels.len) : (y += image.width) {
-                var x: usize = image.width -% 1;
-                while (x < image.width) : (x -%= 1) {
-                    image.pixels[y + x] = try decodePixelReader(&pix, &run, &color_lut, reader);
-                }
-            }
-        },
-        .y => {
-            var y: usize = image.pixels.len -% image.width;
-            while (y < image.pixels.len) : (y -%= image.width) {
-                var x: usize = 0;
-                while (x < image.width) : (x += 1) {
-                    image.pixels[y + x] = try decodePixelReader(&pix, &run, &color_lut, reader);
-                }
-            }
-        },
-        .xy => {
-            var y: usize = image.pixels.len -% image.width;
-            while (y < image.pixels.len) : (y -%= image.width) {
-                var x: usize = image.width -% 1;
-                while (x < image.width) : (x -%= 1) {
-                    image.pixels[y + x] = try decodePixelReader(&pix, &run, &color_lut, reader);
-                }
-            }
-        },
+    const ystart, const ystep, const xstart, const xstep = switch (options.flip) {
+        .none => .{ 0, image.width, 0, 1 },
+        .x => .{ 0, image.width, image.width -% 1, -%@as(usize, 1) },
+        .y => .{ image.pixels.len -% image.width, -%@as(usize, image.width), 0, 1 },
+        .xy => .{ image.pixels.len -% image.width, -%@as(usize, image.width), image.width -% 1, -%@as(usize, 1) },
+    };
+
+    var y: usize = ystart;
+    while (y < image.pixels.len) : (y +%= ystep) {
+        var x: usize = xstart;
+        while (x < image.width) : (x +%= xstep) {
+            image.pixels[y + x] = try decodePixelReader(&pix, &run, &color_lut, reader);
+        }
     }
 
     return image;
@@ -200,7 +180,7 @@ pub fn encode(
 }
 
 fn encodePixelWriter(
-    image: QOI,
+    num_pixels: usize,
     writer: *std.Io.Writer,
     color_lut: *[64]rgba,
     prev: *rgba,
@@ -214,7 +194,7 @@ fn encodePixelWriter(
 
     if (same_pixel) run.* += 1;
 
-    if (run.* > 0 and (run.* == 62 or !same_pixel or (i == (image.pixels.len - 1)))) {
+    if (run.* > 0 and (run.* == 62 or !same_pixel or (i == (num_pixels - 1)))) {
         // Op.RUN
         std.debug.assert(run.* >= 1 and run.* <= 62);
         try writer.writeByte(OP.RUN | (run.* - 1));
@@ -269,49 +249,25 @@ pub fn encodeWriter(
         ntb(self.height) ++
         [_]u8{ @intFromEnum(self.channels), @intFromEnum(self.colorspace) });
 
+    const num_pixels = self.pixels.len;
     var color_lut: [64]rgba = @splat(@splat(0));
     var prev = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: u8 = 0;
 
-    switch (options.flip) {
-        .none => {
-            for (self.pixels, 0..) |pix, i| {
-                try encodePixelWriter(self, writer, &color_lut, &prev, &run, pix, i);
-            }
-        },
-        .x => {
-            var y: usize = 0;
-            while (y < self.pixels.len) : (y += self.width) {
-                var x: usize = self.width -% 1;
-                while (x < self.width) : (x -%= 1) {
-                    const i = y + x;
-                    const pix = self.pixels[i];
-                    try encodePixelWriter(self, writer, &color_lut, &prev, &run, pix, i);
-                }
-            }
-        },
-        .y => {
-            var y: usize = self.pixels.len -% self.width;
-            while (y < self.pixels.len) : (y -%= self.width) {
-                var x: usize = 0;
-                while (x < self.width) : (x += 1) {
-                    const i = y + x;
-                    const pix = self.pixels[i];
-                    try encodePixelWriter(self, writer, &color_lut, &prev, &run, pix, i);
-                }
-            }
-        },
-        .xy => {
-            var y: usize = self.pixels.len -% self.width;
-            while (y < self.pixels.len) : (y -%= self.width) {
-                var x: usize = self.width -% 1;
-                while (x < self.width) : (x -%= 1) {
-                    const i = y + x;
-                    const pix = self.pixels[i];
-                    try encodePixelWriter(self, writer, &color_lut, &prev, &run, pix, i);
-                }
-            }
-        },
+    const ystart, const ystep, const xstart, const xstep = switch (options.flip) {
+        .none => .{ 0, self.width, 0, 1 },
+        .x => .{ 0, self.width, self.width -% 1, -%@as(usize, 1) },
+        .y => .{ self.pixels.len -% self.width, -%@as(usize, self.width), 0, 1 },
+        .xy => .{ self.pixels.len -% self.width, -%@as(usize, self.width), self.width -% 1, -%@as(usize, 1) },
+    };
+
+    var y: usize = ystart;
+    while (y < num_pixels) : (y +%= ystep) {
+        var x: usize = xstart;
+        while (x < self.width) : (x +%= xstep) {
+            const pix = self.pixels[y + x];
+            try encodePixelWriter(num_pixels, writer, &color_lut, &prev, &run, pix, y + x);
+        }
     }
 
     try writer.writeAll(EOF);
