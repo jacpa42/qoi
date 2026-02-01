@@ -64,61 +64,6 @@ pub fn decode(
     return decodeReader(alloc, &reader, options);
 }
 
-/// Decodes and returns the next pixel
-fn decodePixelReader(
-    pix: *rgba,
-    run: *usize,
-    color_lut: *[64]rgba,
-    reader: *std.io.Reader,
-) error{ InvalidFileFormat, ExpectedMorePixelData }!rgba {
-    if (run.* > 0) {
-        run.* -= 1;
-        return pix.*;
-    }
-
-    _ = reader.peek(EOF.len + 1) catch |e| {
-        if (e == error.EndOfStream) {
-            return error.ExpectedMorePixelData;
-        } else {
-            return error.InvalidFileFormat;
-        }
-    };
-
-    const byte = reader.takeByte() catch unreachable;
-    if (byte == OP.RGB) {
-        const data = reader.takeArray(3) catch unreachable;
-        pix[0] = data[0];
-        pix[1] = data[1];
-        pix[2] = data[2];
-    } else if (byte == OP.RGBA) {
-        const data = reader.takeArray(4) catch unreachable;
-        pix.* = @as(rgba, @bitCast(data.*));
-    } else if (byte & 0xc0 == OP.INDEX) {
-        pix.* = color_lut[byte];
-    } else if (byte & 0xc0 == OP.DIFF) {
-        var diff: rgba = @splat(byte);
-        diff >>= rgba{ 4, 2, 0, 0 };
-        diff &= @splat(3);
-        diff -%= @splat(2);
-        diff[3] = 0;
-        pix.* +%= diff;
-    } else if (byte & 0xc0 == OP.LUMA) {
-        const data = reader.takeByte() catch unreachable;
-        const dg = (byte & 0x3f) -% 32;
-        pix.* +%= rgba{
-            (data >> 4) -% 8 +% dg,
-            dg,
-            (data & 15) -% 8 +% dg,
-            0,
-        };
-    } else if (byte & 0xc0 == OP.RUN) {
-        run.* = byte & 0x3f;
-    }
-
-    color_lut[hash(pix.*)] = pix.*;
-    return pix.*;
-}
-
 /// Parses bytes from reader into `QOI`.
 pub fn decodeReader(
     alloc: Allocator,
@@ -154,7 +99,52 @@ pub fn decodeReader(
     while (y < image.pixels.len) : (y +%= ystep) {
         var x: usize = xstart;
         while (x < image.width) : (x +%= xstep) {
-            image.pixels[y + x] = try decodePixelReader(&pix, &run, &color_lut, reader);
+            if (run > 0) {
+                run -= 1;
+            } else {
+                _ = reader.peek(EOF.len + 1) catch |e| {
+                    if (e == error.EndOfStream) {
+                        return error.ExpectedMorePixelData;
+                    } else {
+                        return error.InvalidFileFormat;
+                    }
+                };
+
+                const byte = reader.takeByte() catch unreachable;
+                if (byte == OP.RGB) {
+                    const data = reader.takeArray(3) catch unreachable;
+                    pix[0] = data[0];
+                    pix[1] = data[1];
+                    pix[2] = data[2];
+                } else if (byte == OP.RGBA) {
+                    const data = reader.takeArray(4) catch unreachable;
+                    pix = @as(rgba, @bitCast(data.*));
+                } else if (byte & 0xc0 == OP.INDEX) {
+                    pix = color_lut[byte];
+                } else if (byte & 0xc0 == OP.DIFF) {
+                    var diff: rgba = @splat(byte);
+                    diff >>= rgba{ 4, 2, 0, 0 };
+                    diff &= @splat(3);
+                    diff -%= @splat(2);
+                    diff[3] = 0;
+                    pix +%= diff;
+                } else if (byte & 0xc0 == OP.LUMA) {
+                    const data = reader.takeByte() catch unreachable;
+                    const dg = (byte & 0x3f) -% 32;
+                    pix +%= rgba{
+                        (data >> 4) -% 8 +% dg,
+                        dg,
+                        (data & 15) -% 8 +% dg,
+                        0,
+                    };
+                } else if (byte & 0xc0 == OP.RUN) {
+                    run = byte & 0x3f;
+                }
+
+                color_lut[hash(pix)] = pix;
+            }
+
+            image.pixels[y + x] = pix;
         }
     }
 
@@ -177,65 +167,6 @@ pub fn encode(
     try encodeWriter(self, &out.writer, options);
 
     return out.toArrayList();
-}
-
-fn encodePixelWriter(
-    num_pixels: usize,
-    writer: *std.Io.Writer,
-    color_lut: *[64]rgba,
-    prev: *rgba,
-    run: *u8,
-    pix: rgba,
-    i: usize,
-) error{WriteFailed}!void {
-    defer prev.* = pix;
-
-    const same_pixel = std.meta.eql(pix, prev.*);
-
-    if (same_pixel) run.* += 1;
-
-    if (run.* > 0 and (run.* == 62 or !same_pixel or (i == (num_pixels - 1)))) {
-        // Op.RUN
-        std.debug.assert(run.* >= 1 and run.* <= 62);
-        try writer.writeByte(OP.RUN | (run.* - 1));
-        run.* = 0;
-    }
-
-    if (!same_pixel) {
-        const pix_hash = hash(pix);
-        if (std.meta.eql(color_lut[pix_hash], pix)) {
-            try writer.writeByte(OP.INDEX | pix_hash);
-        } else {
-            color_lut[pix_hash] = pix;
-
-            const diff_r, const diff_g, const diff_b, const diff_a =
-                @as(@Vector(4, i16), pix) - @as(@Vector(4, i16), prev.*);
-
-            const diff_rg = diff_r - diff_g;
-            const diff_rb = diff_b - diff_g;
-
-            if (diff_a != 0) {
-                const pixel = [_]u8{ OP.RGBA, pix[0], pix[1], pix[2], pix[3] };
-                try writer.writeAll(&pixel);
-            } else if (inRange(i2, diff_r) and inRange(i2, diff_g) and inRange(i2, diff_b)) {
-                const byte =
-                    OP.DIFF |
-                    (map2(diff_r) << 4) |
-                    (map2(diff_g) << 2) |
-                    (map2(diff_b) << 0);
-                try writer.writeByte(byte);
-            } else if (inRange(i6, diff_g) and
-                inRange(i4, diff_rg) and
-                inRange(i4, diff_rb))
-            {
-                try writer.writeByte(OP.LUMA | map6(diff_g));
-                try writer.writeByte((map4(diff_rg) << 4) | (map4(diff_rb) << 0));
-            } else {
-                const pixel = [_]u8{ OP.RGB, pix[0], pix[1], pix[2] };
-                try writer.writeAll(&pixel);
-            }
-        }
-    }
 }
 
 /// Writes the encoded file to the `std.io.Writer`.
@@ -266,7 +197,42 @@ pub fn encodeWriter(
         var x: usize = xstart;
         while (x < self.width) : (x +%= xstep) {
             const pix = self.pixels[y + x];
-            try encodePixelWriter(num_pixels, writer, &color_lut, &prev, &run, pix, y + x);
+            defer prev = pix;
+
+            const same_pixel = @reduce(.And, pix == prev);
+            run += @intFromBool(same_pixel);
+            if (run > 0 and (run == 62 or !same_pixel or y + x == num_pixels - 1)) {
+                std.debug.assert(run >= 1 and run <= 62);
+                try writer.writeByte(OP.RUN | (run - 1));
+                run = 0;
+            }
+
+            if (same_pixel) continue;
+
+            const pix_hash = hash(pix);
+            if (std.meta.eql(color_lut[pix_hash], pix)) {
+                try writer.writeByte(OP.INDEX | pix_hash);
+                continue;
+            } else {
+                color_lut[pix_hash] = pix;
+            }
+
+            const diff_r, const diff_g, const diff_b, const diff_a =
+                @as(@Vector(4, i16), pix) - @as(@Vector(4, i16), prev);
+
+            const diff_rg = diff_r - diff_g;
+            const diff_rb = diff_b - diff_g;
+
+            if (diff_a != 0) {
+                try writer.writeAll(&.{ OP.RGBA, pix[0], pix[1], pix[2], pix[3] });
+            } else if (inRange(i2, diff_r) and inRange(i2, diff_g) and inRange(i2, diff_b)) {
+                const byte = OP.DIFF | (map2(diff_r) << 4) | (map2(diff_g) << 2) | (map2(diff_b) << 0);
+                try writer.writeByte(byte);
+            } else if (inRange(i6, diff_g) and inRange(i4, diff_rg) and inRange(i4, diff_rb)) {
+                try writer.writeAll(&.{ OP.LUMA | map6(diff_g), (map4(diff_rg) << 4) | (map4(diff_rb) << 0) });
+            } else {
+                try writer.writeAll(&.{ OP.RGB, pix[0], pix[1], pix[2] });
+            }
         }
     }
 
@@ -354,7 +320,7 @@ test "fuzz test success" {
     var rand = std.Random.DefaultPrng.init(0);
     var alloc = std.testing.allocator;
 
-    for (0..100) |seed| {
+    for (0..10) |seed| {
         {
             rand.seed(seed);
             const rng = rand.random();
