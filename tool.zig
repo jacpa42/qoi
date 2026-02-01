@@ -55,7 +55,7 @@ pub fn main() !void {
     std.log.info("height: {}", .{raw_img.height});
     std.log.info("channels: {t}", .{raw_img.channels});
     std.log.info("colorspace: {t}", .{raw_img.colorspace});
-    std.log.info("pixel count: {}", .{raw_img.pixels.len});
+    std.log.info("memory: {}Kb", .{raw_img.pixels.len / 1000});
 
     var stdout = std.fs.File.stdout();
     var writer = stdout.writer(&buf);

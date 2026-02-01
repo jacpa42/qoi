@@ -21,9 +21,10 @@ pub const DecodeError = error{
     InvalidNumberOfChannels,
     InvalidColorSpaceDescription,
 };
+pub const rgb = @Vector(3, u8);
 pub const rgba = @Vector(4, u8);
-pub const Channels = enum(u8) { RGB = 3, RGBA = 4 };
-pub const ColorSpace = enum(u8) { SRGB = 0, LINEAR = 1 };
+pub const Channels = enum(u3) { RGB = 3, RGBA = 4 };
+pub const ColorSpace = enum(u1) { SRGB = 0, LINEAR = 1 };
 pub const OP = struct {
     const RGB = 0xfe;
     const RGBA = 0xff;
@@ -46,7 +47,7 @@ channels: Channels,
 colorspace: ColorSpace,
 
 /// Pixel array list. Memory is externally managed.
-pixels: []rgba,
+pixels: []u8,
 
 pub fn deinit(self: QOI, alloc: Allocator) void {
     alloc.free(self.pixels);
@@ -70,10 +71,7 @@ pub fn decodeReader(
     reader: *std.Io.Reader,
     options: Options,
 ) DecodeError!QOI {
-    const header = reader.takeArray(HEADER_SIZE) catch {
-        return error.InvalidFileFormat;
-    };
-
+    const header = reader.takeArray(HEADER_SIZE) catch return error.InvalidFileFormat;
     if (!std.mem.eql(u8, header[0..4], MAGIC)) return error.InvalidFileFormat;
 
     var image: QOI = undefined;
@@ -81,33 +79,35 @@ pub fn decodeReader(
     image.height = btn(header[8..12].*);
     image.channels = ite(Channels, header[12]) catch return error.InvalidNumberOfChannels;
     image.colorspace = ite(ColorSpace, header[13]) catch return error.InvalidColorSpaceDescription;
-    image.pixels = try alloc.alloc(rgba, @as(usize, image.width) * @as(usize, image.height));
+
+    const cnum: usize = @intFromEnum(image.channels);
+    const num_pixels = @as(usize, image.width) * @as(usize, image.height);
+    image.pixels = try alloc.alloc(u8, cnum * num_pixels);
     errdefer alloc.free(image.pixels);
 
     var color_lut: [64]rgba = @splat(@splat(0));
     var pix = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: usize = 0;
 
-    const ystart, const ystep, const xstart, const xstep = switch (options.flip) {
-        .none => .{ 0, image.width, 0, 1 },
-        .x => .{ 0, image.width, image.width -% 1, -%@as(usize, 1) },
-        .y => .{ image.pixels.len -% image.width, -%@as(usize, image.width), 0, 1 },
-        .xy => .{ image.pixels.len -% image.width, -%@as(usize, image.width), image.width -% 1, -%@as(usize, 1) },
+    const ystart, const ystep = switch (options.flip) {
+        .none, .x => .{ 0, image.width * cnum },
+        .y, .xy => .{ (num_pixels -% image.width) * cnum, -%(image.width * cnum) },
+    };
+    const xstart, const xstep = switch (options.flip) {
+        .none, .y => .{ 0, cnum },
+        .x, .xy => .{ (image.width -% 1) * cnum, -%cnum },
     };
 
     var y: usize = ystart;
-    while (y < image.pixels.len) : (y +%= ystep) {
+    while (y < num_pixels * cnum) : (y +%= ystep) {
         var x: usize = xstart;
-        while (x < image.width) : (x +%= xstep) {
+        while (x < image.width * cnum) : (x +%= xstep) {
             if (run > 0) {
                 run -= 1;
             } else {
-                _ = reader.peek(EOF.len + 1) catch |e| {
-                    if (e == error.EndOfStream) {
-                        return error.ExpectedMorePixelData;
-                    } else {
-                        return error.InvalidFileFormat;
-                    }
+                _ = reader.peek(EOF.len + 1) catch |e| switch (e) {
+                    error.EndOfStream => return error.ExpectedMorePixelData,
+                    error.ReadFailed => return error.InvalidFileFormat,
                 };
 
                 const byte = reader.takeByte() catch unreachable;
@@ -144,7 +144,11 @@ pub fn decodeReader(
                 color_lut[hash(pix)] = pix;
             }
 
-            image.pixels[y + x] = pix;
+            image.pixels[y + x + 0] = pix[0];
+            image.pixels[y + x + 1] = pix[1];
+            image.pixels[y + x + 2] = pix[2];
+            if (image.channels == .RGBA)
+                image.pixels[y + x + 3] = pix[3];
         }
     }
 
@@ -180,23 +184,31 @@ pub fn encodeWriter(
         ntb(self.height) ++
         [_]u8{ @intFromEnum(self.channels), @intFromEnum(self.colorspace) });
 
-    const num_pixels = self.pixels.len;
+    const cnum: usize = @intFromEnum(self.channels);
+    const num_pixels = @as(usize, self.width) * @as(usize, self.height);
     var color_lut: [64]rgba = @splat(@splat(0));
     var prev = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: u8 = 0;
 
-    const ystart, const ystep, const xstart, const xstep = switch (options.flip) {
-        .none => .{ 0, self.width, 0, 1 },
-        .x => .{ 0, self.width, self.width -% 1, -%@as(usize, 1) },
-        .y => .{ self.pixels.len -% self.width, -%@as(usize, self.width), 0, 1 },
-        .xy => .{ self.pixels.len -% self.width, -%@as(usize, self.width), self.width -% 1, -%@as(usize, 1) },
+    const ystart, const ystep = switch (options.flip) {
+        .none, .x => .{ 0, self.width * cnum },
+        .y, .xy => .{ (num_pixels -% self.width) * cnum, -%(self.width * cnum) },
+    };
+    const xstart, const xstep = switch (options.flip) {
+        .none, .y => .{ 0, cnum },
+        .x, .xy => .{ (self.width -% 1) * cnum, -%cnum },
     };
 
     var y: usize = ystart;
-    while (y < num_pixels) : (y +%= ystep) {
+    while (y < num_pixels * cnum) : (y +%= ystep) {
         var x: usize = xstart;
-        while (x < self.width) : (x +%= xstep) {
-            const pix = self.pixels[y + x];
+        while (x < self.width * cnum) : (x +%= xstep) {
+            const pix = rgba{
+                self.pixels[y + x + 0],
+                self.pixels[y + x + 1],
+                self.pixels[y + x + 2],
+                if (self.channels == .RGBA) self.pixels[y + x + 3] else 0xff,
+            };
             defer prev = pix;
 
             const same_pixel = @reduce(.And, pix == prev);
@@ -282,12 +294,13 @@ test "encode decode encode" {
 
             const width = rng.intRangeAtMost(u32, 100, 1000);
             const height = rng.intRangeAtMost(u32, 100, 1000);
+            const channels = rng.enumValue(Channels);
             var image = QOI{
                 .width = width,
                 .height = height,
-                .channels = rng.enumValue(Channels),
+                .channels = channels,
                 .colorspace = rng.enumValue(ColorSpace),
-                .pixels = try alloc.alloc(rgba, @as(usize, width) * @as(usize, height)),
+                .pixels = try alloc.alloc(u8, @intFromEnum(channels) * @as(usize, width) * @as(usize, height)),
             };
             defer image.deinit(alloc);
 
@@ -331,7 +344,7 @@ test "fuzz test success" {
             qoi.height = rng.intRangeAtMost(u32, 0, std.math.maxInt(u12));
             qoi.channels = rng.enumValue(Channels);
             qoi.colorspace = rng.enumValue(ColorSpace);
-            qoi.pixels = try alloc.alloc(rgba, @as(usize, qoi.width * qoi.height));
+            qoi.pixels = try alloc.alloc(u8, @intFromEnum(qoi.channels) * @as(usize, qoi.width * qoi.height));
             defer qoi.deinit(alloc);
 
             var encoded = try qoi.encode(alloc, .{});
