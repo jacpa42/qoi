@@ -1,6 +1,46 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+pub const DecodeError = error{
+    ExpectedMorePixelData,
+    InvalidFileFormat,
+    OutOfMemory,
+    InvalidNumberOfChannels,
+    InvalidColorSpaceDescription,
+};
+pub const irgba = @Vector(4, i8);
+pub const rgba = @Vector(4, u8);
+pub const Channels = enum(u8) { rgb = 3, rgba = 4 };
+pub const ColorSpace = enum(u8) { srgb = 0, linear = 1 };
+pub const Op = struct {
+    const rgb = 0xfe;
+    const rgba = 0xff;
+    const index = 0x00;
+    const diff = 0x40;
+    const luma = 0x80;
+    const run = 0xc0;
+};
+
+const max_pixels = 400_000_000;
+const magic = "qoif";
+const eof = "\x00" ** 7 ++ "\x01";
+const header_size = 14;
+
+/// A parsed QOI image. Does not hold onto an allocator. Use `image.deinit(alloc)` to free memory.
+const QOI = @This();
+
+width: u32,
+height: u32,
+channels: Channels,
+colorspace: ColorSpace,
+
+/// Pixel array list. Memory is externally managed.
+pixel_data: []const u8,
+
+pub fn deinit(self: QOI, alloc: Allocator) void {
+    alloc.free(self.pixel_data);
+}
+
 pub const Options = struct {
     // Flip the image vertically
     flip: Flip = .none,
@@ -14,45 +54,6 @@ pub const Options = struct {
         xy,
     };
 };
-pub const DecodeError = error{
-    ExpectedMorePixelData,
-    InvalidFileFormat,
-    OutOfMemory,
-    InvalidNumberOfChannels,
-    InvalidColorSpaceDescription,
-};
-pub const rgb = @Vector(3, u8);
-pub const rgba = @Vector(4, u8);
-pub const Channels = enum(u3) { RGB = 3, RGBA = 4 };
-pub const ColorSpace = enum(u1) { SRGB = 0, LINEAR = 1 };
-pub const OP = struct {
-    const RGB = 0xfe;
-    const RGBA = 0xff;
-    const INDEX = 0x00;
-    const DIFF = 0x40;
-    const LUMA = 0x80;
-    const RUN = 0xc0;
-};
-
-const max_pixels = 400_000_000;
-const MAGIC = "qoif";
-const EOF = "\x00" ** 7 ++ "\x01";
-const HEADER_SIZE = 14;
-
-/// A parsed QOI image. Does not hold onto an allocator. Use `image.deinit(alloc)` to free memory.
-const QOI = @This();
-
-width: u32,
-height: u32,
-channels: Channels,
-colorspace: ColorSpace,
-
-/// Pixel array list. Memory is externally managed.
-pixels: []u8,
-
-pub fn deinit(self: QOI, alloc: Allocator) void {
-    alloc.free(self.pixels);
-}
 
 /// Parses bytes from the buffer into `QOI`.
 ///
@@ -72,8 +73,8 @@ pub fn decodeReader(
     reader: *std.Io.Reader,
     options: Options,
 ) DecodeError!QOI {
-    const header = reader.takeArray(HEADER_SIZE) catch return error.InvalidFileFormat;
-    if (!std.mem.eql(u8, header[0..4], MAGIC)) return error.InvalidFileFormat;
+    const header = reader.takeArray(header_size) catch return error.InvalidFileFormat;
+    if (!std.mem.eql(u8, header[0..4], magic)) return error.InvalidFileFormat;
 
     var image: QOI = undefined;
     image.width = btn(header[4..8].*);
@@ -81,81 +82,100 @@ pub fn decodeReader(
     image.channels = ite(Channels, header[12]) catch return error.InvalidNumberOfChannels;
     image.colorspace = ite(ColorSpace, header[13]) catch return error.InvalidColorSpaceDescription;
 
-    const cnum: usize = @intFromEnum(image.channels);
+    const pixel_size: usize = @intFromEnum(image.channels);
     const num_pixels = @as(usize, image.width) * @as(usize, image.height);
 
     if (num_pixels > max_pixels) return error.OutOfMemory;
-
-    image.pixels = try alloc.alloc(u8, cnum * num_pixels);
-    errdefer alloc.free(image.pixels);
+    const pixel_data = try alloc.alloc(u8, pixel_size * num_pixels);
+    errdefer alloc.free(pixel_data);
 
     var color_lut: [64]rgba = @splat(@splat(0));
     var pix = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: usize = 0;
 
-    const ystart, const ystep = switch (options.flip) {
-        .none, .x => .{ 0, image.width * cnum },
-        .y, .xy => .{ (num_pixels -% image.width) * cnum, -%(image.width * cnum) },
-    };
-    const xstart, const xstep = switch (options.flip) {
-        .none, .y => .{ 0, cnum },
-        .x, .xy => .{ (image.width -% 1) * cnum, -%cnum },
-    };
+    var ystart: usize = 0;
+    var ystep: usize = image.width * pixel_size;
+    var xstart: usize = 0;
+    var xstep: usize = pixel_size;
+    switch (options.flip) {
+        .none => {},
+        .x => {
+            xstart = (image.width -% 1) * pixel_size;
+            xstep = -%xstep;
+        },
+        .y => {
+            ystart = (num_pixels -% image.width) * pixel_size;
+            ystep = -%ystep;
+        },
+        .xy => {
+            ystart = (num_pixels -% image.width) * pixel_size;
+            ystep = -%ystep;
+            xstart = (image.width -% 1) * pixel_size;
+            xstep = -%xstep;
+        },
+    }
 
     var y: usize = ystart;
-    while (y < num_pixels * cnum) : (y +%= ystep) {
+    while (y < num_pixels * pixel_size) : (y +%= ystep) {
         var x: usize = xstart;
-        while (x < image.width * cnum) : (x +%= xstep) {
+        while (x < image.width * pixel_size) : (x +%= xstep) {
             if (run > 0) {
+                @branchHint(.unlikely);
                 run -= 1;
             } else {
-                _ = reader.peek(EOF.len + 1) catch |e| switch (e) {
+                @branchHint(.likely);
+                _ = reader.peek(eof.len + 1) catch |e| switch (e) {
                     error.EndOfStream => return error.ExpectedMorePixelData,
                     error.ReadFailed => return error.InvalidFileFormat,
                 };
+                defer color_lut[hash(pix)] = pix;
 
                 const byte = reader.takeByte() catch unreachable;
-                if (byte == OP.RGB) {
-                    const data = reader.takeArray(3) catch unreachable;
-                    pix[0] = data[0];
-                    pix[1] = data[1];
-                    pix[2] = data[2];
-                } else if (byte == OP.RGBA) {
-                    const data = reader.takeArray(4) catch unreachable;
-                    pix = @as(rgba, @bitCast(data.*));
-                } else if (byte & 0xc0 == OP.INDEX) {
-                    pix = color_lut[byte];
-                } else if (byte & 0xc0 == OP.DIFF) {
-                    var diff: rgba = @splat(byte);
-                    diff >>= rgba{ 4, 2, 0, 0 };
-                    diff &= @splat(3);
-                    diff -%= @splat(2);
-                    diff[3] = 0;
-                    pix +%= diff;
-                } else if (byte & 0xc0 == OP.LUMA) {
-                    const data = reader.takeByte() catch unreachable;
-                    const dg = (byte & 0x3f) -% 32;
-                    pix +%= rgba{
-                        (data >> 4) -% 8 +% dg,
-                        dg,
-                        (data & 15) -% 8 +% dg,
-                        0,
-                    };
-                } else if (byte & 0xc0 == OP.RUN) {
-                    run = byte & 0x3f;
+                switch (byte >> 6) {
+                    Op.index >> 6 => pix = color_lut[byte],
+                    Op.diff >> 6 => {
+                        var diff: rgba = @splat(byte);
+                        diff >>= rgba{ 4, 2, 0, 0 };
+                        diff &= @splat(3);
+                        diff -%= @splat(2);
+                        diff[3] = 0;
+                        pix +%= diff;
+                    },
+                    Op.luma >> 6 => {
+                        const data = reader.takeByte() catch unreachable;
+                        const dg = (byte & 0x3f) -% 32;
+                        pix +%= rgba{
+                            (data >> 4) -% 8 +% dg,
+                            dg,
+                            (data & 15) -% 8 +% dg,
+                            0,
+                        };
+                    },
+                    Op.run >> 6 => switch (byte) {
+                        Op.rgb => {
+                            const data = reader.takeArray(3) catch unreachable;
+                            pix[0] = data[0];
+                            pix[1] = data[1];
+                            pix[2] = data[2];
+                        },
+                        Op.rgba => {
+                            pix = @as(rgba, (reader.takeArray(4) catch unreachable).*);
+                        },
+                        else => run = byte & 0x3f, // run
+                    },
+                    else => unreachable,
                 }
-
-                color_lut[hash(pix)] = pix;
             }
 
-            image.pixels[y + x + 0] = pix[0];
-            image.pixels[y + x + 1] = pix[1];
-            image.pixels[y + x + 2] = pix[2];
-            if (image.channels == .RGBA)
-                image.pixels[y + x + 3] = pix[3];
+            pixel_data[y + x + 0] = pix[0];
+            pixel_data[y + x + 1] = pix[1];
+            pixel_data[y + x + 2] = pix[2];
+            if (image.channels == .rgba)
+                pixel_data[y + x + 3] = pix[3];
         }
     }
 
+    image.pixel_data = pixel_data;
     return image;
 }
 
@@ -167,11 +187,10 @@ pub fn decodeReader(
 pub fn encode(
     self: QOI,
     alloc: Allocator,
-    options: Options,
 ) error{WriteFailed}!std.ArrayList(u8) {
     var out = std.io.Writer.Allocating.init(alloc);
     errdefer out.deinit();
-    try encodeWriter(self, &out.writer, options);
+    try encodeWriter(self, &out.writer);
     return out.toArrayList();
 }
 
@@ -179,13 +198,12 @@ pub fn encode(
 pub fn encodeWriter(
     self: QOI,
     writer: *std.Io.Writer,
-    options: Options,
 ) error{WriteFailed}!void {
     const pixel_info = [2]u8{ @intFromEnum(self.channels), @intFromEnum(self.colorspace) };
-    const header = MAGIC ++ ntb(self.width) ++ ntb(self.height) ++ pixel_info;
+    const header = magic ++ ntb(self.width) ++ ntb(self.height) ++ pixel_info;
     try writer.writeAll(header);
 
-    const cnum: usize = @intFromEnum(self.channels);
+    const pixel_size: usize = @intFromEnum(self.channels);
     const num_pixels = @as(usize, self.width) * @as(usize, self.height);
 
     if (num_pixels > max_pixels) return error.WriteFailed;
@@ -194,103 +212,88 @@ pub fn encodeWriter(
     var prev = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: u8 = 0;
 
-    const ystart, const ystep = switch (options.flip) {
-        .none, .x => .{ 0, self.width * cnum },
-        .y, .xy => .{ (num_pixels -% self.width) * cnum, -%(self.width * cnum) },
-    };
-    const xstart, const xstep = switch (options.flip) {
-        .none, .y => .{ 0, cnum },
-        .x, .xy => .{ (self.width -% 1) * cnum, -%cnum },
-    };
+    var i: usize = 0;
+    while (i < self.pixel_data.len) : (i += pixel_size) {
+        const pix = rgba{
+            self.pixel_data[i + 0],
+            self.pixel_data[i + 1],
+            self.pixel_data[i + 2],
+            if (self.channels == .rgba) self.pixel_data[i + 3] else 0xff,
+        };
+        defer prev = pix;
 
-    var y: usize = ystart;
-    while (y < num_pixels * cnum) : (y +%= ystep) {
-        var x: usize = xstart;
-        while (x < self.width * cnum) : (x +%= xstep) {
-            const pix = rgba{
-                self.pixels[y + x + 0],
-                self.pixels[y + x + 1],
-                self.pixels[y + x + 2],
-                if (self.channels == .RGBA) self.pixels[y + x + 3] else 0xff,
-            };
-            defer prev = pix;
-
-            const same_pixel = @reduce(.And, pix == prev);
-            run += @intFromBool(same_pixel);
-            if (run > 0 and (run == 62 or !same_pixel or y + x == num_pixels - 1)) {
+        if (@reduce(.And, pix == prev)) {
+            run += 1;
+            if (run == 62 or i == self.pixel_data.len - pixel_size) {
                 std.debug.assert(run >= 1 and run <= 62);
-                try writer.writeByte(OP.RUN | (run - 1));
+                try writer.writeByte(Op.run | (run - 1));
+                run = 0;
+            }
+        } else {
+            if (run > 0) {
+                try writer.writeByte(Op.run | (run - 1));
                 run = 0;
             }
 
-            if (same_pixel) continue;
-
-            const pix_hash = hash(pix);
-            if (std.meta.eql(color_lut[pix_hash], pix)) {
-                try writer.writeByte(OP.INDEX | pix_hash);
-                continue;
+            const pos = hash(pix);
+            if (@reduce(.And, color_lut[pos] == pix)) {
+                try writer.writeByte(Op.index | pos);
             } else {
-                color_lut[pix_hash] = pix;
-            }
+                color_lut[pos] = pix;
 
-            const diff_r, const diff_g, const diff_b, const diff_a =
-                @as(@Vector(4, i16), pix) - @as(@Vector(4, i16), prev);
+                if ((pix == prev)[3]) {
+                    // alpha element is 0!
+                    var diff: irgba = @bitCast(pix -% prev);
+                    std.debug.assert(diff[3] == 0);
+                    var diff2 = diff;
+                    diff2 -%= irgba{ diff[1], 0, diff[1], 0 };
 
-            const diff_rg = diff_r - diff_g;
-            const diff_rb = diff_b - diff_g;
-
-            if (diff_a != 0) {
-                try writer.writeAll(&.{ OP.RGBA, pix[0], pix[1], pix[2], pix[3] });
-            } else if (inRange(i2, diff_r) and inRange(i2, diff_g) and inRange(i2, diff_b)) {
-                const byte = OP.DIFF | (map2(diff_r) << 4) | (map2(diff_g) << 2) | (map2(diff_b) << 0);
-                try writer.writeByte(byte);
-            } else if (inRange(i6, diff_g) and inRange(i4, diff_rg) and inRange(i4, diff_rb)) {
-                try writer.writeAll(&.{ OP.LUMA | map6(diff_g), (map4(diff_rg) << 4) | (map4(diff_rb) << 0) });
-            } else {
-                try writer.writeAll(&.{ OP.RGB, pix[0], pix[1], pix[2] });
+                    if (checkDiff(diff)) {
+                        diff += @splat(2);
+                        const v: u8 = @reduce(.Or, @as(rgba, @bitCast(diff)) * rgba{ 0x10, 0x04, 0x01, 0x00 });
+                        try writer.writeByte(Op.diff | v);
+                    } else if (checkLuma(diff2)) {
+                        try writer.writeAll(&.{ Op.luma | m6(diff[1]), m4(diff2[0]) << 4 | m4(diff2[2]) });
+                    } else {
+                        try writer.writeAll(&([_]u8{Op.rgb} ++ @as([4]u8, pix)[0..3].*));
+                    }
+                } else {
+                    try writer.writeAll(&([_]u8{Op.rgba} ++ @as([4]u8, pix)));
+                }
             }
         }
     }
 
-    try writer.writeAll(EOF);
+    try writer.writeAll(eof);
     try writer.flush();
 }
 
 const ite = std.meta.intToEnum;
 
-inline fn hash(color: rgba) u8 {
-    return 0x3f & @reduce(.Add, color *% rgba{ 3, 5, 7, 11 });
+// zig fmt: off
+fn hash(color: rgba) u6 { return @truncate(@reduce(.Add, color *% rgba{ 3, 5, 7, 11 })); }
+fn ntb(v: u32) [4]u8 { return @bitCast(std.mem.nativeToBig(u32, v)); }
+fn btn(v: [4]u8) u32 { return @bitCast(std.mem.bigToNative(u32, @bitCast(v))); }
+fn m2(val: i8) u8 { return @intCast(val + 2); }
+fn m4(val: i8) u8 { return @intCast(val + 8); }
+fn m6(val: i8) u8 { return @intCast(val + 32); }
+// zig fmt: on
+fn checkDiff(diff: irgba) bool {
+    const l = diff > @as(irgba, @splat(-0x3));
+    const r = diff < @as(irgba, @splat(0x02));
+    return @reduce(.And, l & r);
 }
-
-inline fn ntb(v: u32) [4]u8 {
-    return @bitCast(std.mem.nativeToBig(u32, v));
-}
-
-inline fn btn(v: [4]u8) u32 {
-    return @bitCast(std.mem.bigToNative(u32, @bitCast(v)));
-}
-
-inline fn inRange(comptime T: type, val: i16) bool {
-    if (@typeInfo(T).int.signedness != .signed) @compileError("");
-    return std.math.minInt(T) <= val and val <= std.math.maxInt(T);
-}
-
-inline fn map2(val: i16) u8 {
-    return @as(u2, @intCast(val + 2));
-}
-
-inline fn map4(val: i16) u8 {
-    return @as(u4, @intCast(val + 8));
-}
-
-inline fn map6(val: i16) u8 {
-    return @as(u6, @intCast(val + 32));
+fn checkLuma(diff2: irgba) bool {
+    const l = diff2 > irgba{ -0x9, -0x21, -0x9, std.math.minInt(i8) };
+    const r = diff2 < irgba{ 0x08, 0x020, 0x08, std.math.maxInt(i8) };
+    return @reduce(.And, l & r);
 }
 
 test "encode decode encode" {
     var rand = std.Random.DefaultPrng.init(0);
     var alloc = std.testing.allocator;
 
+    std.debug.print("--\n", .{});
     for (0..100) |seed| {
         {
             rand.seed(seed);
@@ -299,16 +302,22 @@ test "encode decode encode" {
             const width = rng.intRangeAtMost(u32, 100, 1000);
             const height = rng.intRangeAtMost(u32, 100, 1000);
             const channels = rng.enumValue(Channels);
+            const num_pixels = @intFromEnum(channels) * @as(usize, width) * @as(usize, height);
             var image = QOI{
                 .width = width,
                 .height = height,
                 .channels = channels,
                 .colorspace = rng.enumValue(ColorSpace),
-                .pixels = try alloc.alloc(u8, @intFromEnum(channels) * @as(usize, width) * @as(usize, height)),
+                .pixel_data = try alloc.alloc(u8, num_pixels),
             };
+            std.debug.print("image.width = {}\n", .{image.width});
+            std.debug.print("image.height = {}\n", .{image.height});
+            std.debug.print("image.channels = {}\n", .{image.channels});
+            std.debug.print("image.colorspace = {}\n", .{image.colorspace});
+            std.debug.print("image.pixels.len = {}\n\n", .{num_pixels});
             defer image.deinit(alloc);
 
-            var encoded = try encode(image, alloc, .{});
+            var encoded = try encode(image, alloc);
             defer encoded.deinit(alloc);
             var decoded_image = try decode(alloc, encoded.items, .{});
             defer decoded_image.deinit(alloc);
@@ -348,10 +357,10 @@ test "fuzz test success" {
             qoi.height = rng.intRangeAtMost(u32, 0, std.math.maxInt(u12));
             qoi.channels = rng.enumValue(Channels);
             qoi.colorspace = rng.enumValue(ColorSpace);
-            qoi.pixels = try alloc.alloc(u8, @intFromEnum(qoi.channels) * @as(usize, qoi.width * qoi.height));
+            qoi.pixel_data = try alloc.alloc(u8, @intFromEnum(qoi.channels) * @as(usize, qoi.width * qoi.height));
             defer qoi.deinit(alloc);
 
-            var encoded = try qoi.encode(alloc, .{});
+            var encoded = try qoi.encode(alloc);
             defer encoded.deinit(alloc);
 
             var image = try decode(alloc, encoded.items, .{});

@@ -24,7 +24,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_tool = b.addRunArtifact(tool_exe);
+    b.installArtifact(tool_exe);
     for (b.args orelse &.{}) |arg| run_tool.addArg(arg);
-    const tool_step = b.step("tool", "Run tool which decodes and file and then encodes it to stdout.");
+    const tool_step = b.step("tool", "Run tool which decodes and file and then encodes.");
     tool_step.dependOn(&run_tool.step);
 }

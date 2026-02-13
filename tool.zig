@@ -8,7 +8,8 @@ pub fn main() !void {
 
     var flipx: bool = false;
     var flipy: bool = false;
-    var path_opt: ?[:0]const u8 = null;
+    var pbuf: [2][:0]const u8 = undefined;
+    var paths = std.ArrayList([:0]const u8).initBuffer(&pbuf);
 
     {
         var args = std.process.args();
@@ -25,28 +26,34 @@ pub fn main() !void {
             {
                 flipy = true;
             } else {
-                path_opt = arg;
+                try paths.appendBounded(arg);
             }
         }
     }
 
-    const path = path_opt orelse return error.ExpectedQoiFilePath;
-    const opts = qoi.Options{
-        .flip = if (flipx and flipy)
-            qoi.Options.Flip.xy
-        else if (flipx and !flipy)
-            qoi.Options.Flip.x
-        else if (!flipx and flipy)
-            qoi.Options.Flip.y
-        else
-            qoi.Options.Flip.none,
-    };
+    if (paths.items.len < 1) {
+        return error.ExpectedInputFile;
+    }
+    if (paths.items.len == 2 and std.mem.eql(u8, paths.items[0], paths.items[1])) {
+        return error.InputAndOutputFilesCannotBeTheSame;
+    }
 
-    const file = try std.fs.cwd().openFile(path, .{});
+    // zig fmt: off
+    const in_path = paths.items[0];
+    const opts = qoi.Options{
+        .flip =
+            if (flipx and flipy) .xy
+            else if (flipx and !flipy) .x
+            else if (!flipx and flipy) .y
+            else .none,
+    };
+    // zig fmt: on
+
+    const file = try std.fs.cwd().openFile(in_path, .{});
     defer file.close();
 
-    var buf: [1024]u8 = undefined;
-    var freader = file.reader(&buf);
+    var iobuf: [8 * 1024]u8 = undefined;
+    var freader = file.reader(&iobuf);
 
     var raw_img = try qoi.decodeReader(alloc, &freader.interface, opts);
     defer raw_img.deinit(alloc);
@@ -54,11 +61,13 @@ pub fn main() !void {
     std.log.info("width: {}", .{raw_img.width});
     std.log.info("height: {}", .{raw_img.height});
     std.log.info("channels: {t}", .{raw_img.channels});
-    std.log.info("colorspace: {t}", .{raw_img.colorspace});
-    std.log.info("memory: {}Kb", .{raw_img.pixels.len / 1000});
+    std.log.info("colour space: {t}", .{raw_img.colorspace});
+    std.log.info("memory: {}Kb", .{raw_img.pixel_data.len / 1000});
 
-    var stdout = std.fs.File.stdout();
-    var writer = stdout.writer(&buf);
-
-    try qoi.encodeWriter(raw_img, &writer.interface, .{});
+    if (paths.items.len == 2) {
+        const out_path = paths.items[1];
+        var stdout = try std.fs.cwd().createFile(out_path, .{});
+        var writer = stdout.writer(&iobuf);
+        try qoi.encodeWriter(raw_img, &writer.interface);
+    }
 }
