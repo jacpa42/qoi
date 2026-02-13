@@ -35,7 +35,7 @@ channels: Channels,
 colorspace: ColorSpace,
 
 /// Pixel array list. Memory is externally managed.
-pixel_data: []const u8,
+pixel_data: []u8,
 
 pub fn deinit(self: QOI, alloc: Allocator) void {
     alloc.free(self.pixel_data);
@@ -86,8 +86,8 @@ pub fn decodeReader(
     const num_pixels = @as(usize, image.width) * @as(usize, image.height);
 
     if (num_pixels > max_pixels) return error.OutOfMemory;
-    const pixel_data = try alloc.alloc(u8, pixel_size * num_pixels);
-    errdefer alloc.free(pixel_data);
+    image.pixel_data = try alloc.alloc(u8, pixel_size * num_pixels);
+    errdefer alloc.free(image.pixel_data);
 
     var color_lut: [64]rgba = @splat(@splat(0));
     var pix = rgba{ 0x00, 0x00, 0x00, 0xff };
@@ -167,15 +167,14 @@ pub fn decodeReader(
                 }
             }
 
-            pixel_data[y + x + 0] = pix[0];
-            pixel_data[y + x + 1] = pix[1];
-            pixel_data[y + x + 2] = pix[2];
+            image.pixel_data[y + x + 0] = pix[0];
+            image.pixel_data[y + x + 1] = pix[1];
+            image.pixel_data[y + x + 2] = pix[2];
             if (image.channels == .rgba)
-                pixel_data[y + x + 3] = pix[3];
+                image.pixel_data[y + x + 3] = pix[3];
         }
     }
 
-    image.pixel_data = pixel_data;
     return image;
 }
 
