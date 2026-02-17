@@ -63,7 +63,7 @@ pub fn decode(
     raw_bytes: []const u8,
     options: Options,
 ) DecodeError!QOI {
-    var reader = std.io.Reader.fixed(raw_bytes);
+    var reader = std.Io.Reader.fixed(raw_bytes);
     return decodeReader(alloc, &reader, options);
 }
 
@@ -90,7 +90,7 @@ pub fn decodeReader(
     errdefer alloc.free(image.pixel_data);
 
     var color_lut: [64]rgba = @splat(@splat(0));
-    var pix = rgba{ 0x00, 0x00, 0x00, 0xff };
+    var pixel = rgba{ 0x00, 0x00, 0x00, 0xff };
     var run: usize = 0;
 
     var ystart: usize = 0;
@@ -128,23 +128,23 @@ pub fn decodeReader(
                     error.EndOfStream => return error.ExpectedMorePixelData,
                     error.ReadFailed => return error.InvalidFileFormat,
                 };
-                defer color_lut[hash(pix)] = pix;
+                defer color_lut[hash(pixel)] = pixel;
 
                 const byte = reader.takeByte() catch unreachable;
                 switch (byte >> 6) {
-                    Op.index >> 6 => pix = color_lut[byte],
+                    Op.index >> 6 => pixel = color_lut[byte],
                     Op.diff >> 6 => {
                         var diff: rgba = @splat(byte);
                         diff >>= rgba{ 4, 2, 0, 0 };
                         diff &= @splat(3);
                         diff -%= @splat(2);
                         diff[3] = 0;
-                        pix +%= diff;
+                        pixel +%= diff;
                     },
                     Op.luma >> 6 => {
                         const data = reader.takeByte() catch unreachable;
-                        const dg = (byte & 0x3f) -% 32;
-                        pix +%= rgba{
+                        const dg = (byte & 63) -% 32;
+                        pixel +%= rgba{
                             (data >> 4) -% 8 +% dg,
                             dg,
                             (data & 15) -% 8 +% dg,
@@ -154,12 +154,12 @@ pub fn decodeReader(
                     Op.run >> 6 => switch (byte) {
                         Op.rgb => {
                             const data = reader.takeArray(3) catch unreachable;
-                            pix[0] = data[0];
-                            pix[1] = data[1];
-                            pix[2] = data[2];
+                            pixel[0] = data[0];
+                            pixel[1] = data[1];
+                            pixel[2] = data[2];
                         },
                         Op.rgba => {
-                            pix = @as(rgba, (reader.takeArray(4) catch unreachable).*);
+                            pixel = @as(rgba, (reader.takeArray(4) catch unreachable).*);
                         },
                         else => run = byte & 0x3f, // run
                     },
@@ -167,11 +167,12 @@ pub fn decodeReader(
                 }
             }
 
-            image.pixel_data[y + x + 0] = pix[0];
-            image.pixel_data[y + x + 1] = pix[1];
-            image.pixel_data[y + x + 2] = pix[2];
-            if (image.channels == .rgba)
-                image.pixel_data[y + x + 3] = pix[3];
+            image.pixel_data[y + x + 0] = pixel[0];
+            image.pixel_data[y + x + 1] = pixel[1];
+            image.pixel_data[y + x + 2] = pixel[2];
+            if (image.channels == .rgba) {
+                image.pixel_data[y + x + 3] = pixel[3];
+            }
         }
     }
 

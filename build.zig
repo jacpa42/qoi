@@ -14,18 +14,4 @@ pub fn build(b: *std.Build) void {
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
-
-    const tool_exe = b.addExecutable(.{
-        .name = "tool",
-        .root_module = b.addModule("tool", .{
-            .root_source_file = b.path("tool.zig"),
-            .optimize = optimize,
-            .target = target,
-        }),
-    });
-    const run_tool = b.addRunArtifact(tool_exe);
-    b.installArtifact(tool_exe);
-    for (b.args orelse &.{}) |arg| run_tool.addArg(arg);
-    const tool_step = b.step("tool", "Run tool which decodes and file and then encodes.");
-    tool_step.dependOn(&run_tool.step);
 }
