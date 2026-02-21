@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 
 pub const DecodeError = error{
     ExpectedMorePixelData,
@@ -37,7 +36,7 @@ colorspace: ColorSpace,
 /// Pixel array list. Memory is externally managed.
 pixel_data: []u8,
 
-pub fn deinit(self: QOI, alloc: Allocator) void {
+pub fn deinit(self: QOI, alloc: std.mem.Allocator) void {
     alloc.free(self.pixel_data);
 }
 
@@ -59,17 +58,17 @@ pub const Options = struct {
 ///
 /// Needs allocator to put the pixel data. Use `deinit(alloc)` do deinitialize.
 pub fn decode(
-    alloc: Allocator,
-    raw_bytes: []const u8,
+    alloc: std.mem.Allocator,
+    slice: []const u8,
     options: Options,
 ) DecodeError!QOI {
-    var reader = std.Io.Reader.fixed(raw_bytes);
+    var reader = std.Io.Reader.fixed(slice);
     return decodeReader(alloc, &reader, options);
 }
 
 /// Parses bytes from reader into `QOI`.
 pub fn decodeReader(
-    alloc: Allocator,
+    alloc: std.mem.llocator,
     reader: *std.Io.Reader,
     options: Options,
 ) DecodeError!QOI {
@@ -186,7 +185,7 @@ pub fn decodeReader(
 /// `inital_capacity`: Optionally pass a size to preallocate for the data arraylist.
 pub fn encode(
     self: QOI,
-    alloc: Allocator,
+    alloc: std.mem.Allocator,
 ) error{WriteFailed}!std.ArrayList(u8) {
     var out = std.io.Writer.Allocating.init(alloc);
     errdefer out.deinit();

@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const modqoi = b.addModule("qoi", .{
+    const modqoi = b.addModule("root", .{
         .root_source_file = b.path("qoi.zig"),
         .target = target,
         .optimize = optimize,
