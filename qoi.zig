@@ -68,7 +68,7 @@ pub fn decode(
 
 /// Parses bytes from reader into `QOI`.
 pub fn decodeReader(
-    alloc: std.mem.llocator,
+    alloc: std.mem.Allocator,
     reader: *std.Io.Reader,
     options: Options,
 ) DecodeError!QOI {
