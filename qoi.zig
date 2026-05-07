@@ -9,8 +9,28 @@ pub const DecodeError = error{
 };
 pub const irgba = @Vector(4, i8);
 pub const rgba = @Vector(4, u8);
-pub const Channels = enum(u8) { rgb = 3, rgba = 4 };
-pub const ColorSpace = enum(u8) { srgb = 0, linear = 1 };
+pub const Channels = enum(u8) {
+    rgb = 3,
+    rgba = 4,
+    fn fromByte(b: u8) error{InvalidNumberOfChannels}!Channels {
+        return switch (b) {
+            3 => Channels.rgb,
+            4 => Channels.rgba,
+            else => error.InvalidNumberOfChannels,
+        };
+    }
+};
+pub const ColorSpace = enum(u8) {
+    srgb = 0,
+    linear = 1,
+    fn fromByte(b: u8) error{InvalidColorSpaceDescription}!ColorSpace {
+        return switch (b) {
+            0 => ColorSpace.srgb,
+            1 => ColorSpace.linear,
+            else => error.InvalidColorSpaceDescription,
+        };
+    }
+};
 pub const Op = struct {
     const rgb = 0xfe;
     const rgba = 0xff;
@@ -78,8 +98,8 @@ pub fn decodeReader(
     var image: QOI = undefined;
     image.width = btn(header[4..8].*);
     image.height = btn(header[8..12].*);
-    image.channels = ite(Channels, header[12]) catch return error.InvalidNumberOfChannels;
-    image.colorspace = ite(ColorSpace, header[13]) catch return error.InvalidColorSpaceDescription;
+    image.channels = try Channels.fromByte(header[12]);
+    image.colorspace = try ColorSpace.fromByte(header[13]);
 
     const pixel_size: usize = @intFromEnum(image.channels);
     const num_pixels = @as(usize, image.width) * @as(usize, image.height);
@@ -187,7 +207,7 @@ pub fn encode(
     self: QOI,
     alloc: std.mem.Allocator,
 ) error{WriteFailed}!std.ArrayList(u8) {
-    var out = std.io.Writer.Allocating.init(alloc);
+    var out = std.Io.Writer.Allocating.init(alloc);
     errdefer out.deinit();
     try encodeWriter(self, &out.writer);
     return out.toArrayList();
@@ -266,8 +286,6 @@ pub fn encodeWriter(
     try writer.writeAll(eof);
     try writer.flush();
 }
-
-const ite = std.meta.intToEnum;
 
 // zig fmt: off
 fn hash(color: rgba) u6 { return @truncate(@reduce(.Add, color *% rgba{ 3, 5, 7, 11 })); }

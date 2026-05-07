@@ -2,7 +2,7 @@
     .name = .qoi,
     .version = "0.0.1",
     .fingerprint = 0x7c7975e1a0bdb7cd,
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
